@@ -1,48 +1,159 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <fcntl.h>
-#include <string.h>
-#include <errno.h>
-#include <dirent.h>
-#include <time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <pwd.h>
+#include <time.h>
+#include <string.h>
+#include <dirent.h>
+#include <libgen.h>
  
- 
-struct bmp_info_header {
-    int size;
-    int width;
-    int height;
-};
- 
-int endsWithBmp(const char *filename) {
-    size_t len = strlen(filename);
-    return len >= 4 && strcmp(filename + len - 4, ".bmp") == 0;
+char stats[1024];
+
+// Funcție pentru a verifica dacă este un fișier BMP
+int is_bmp_file(const char *filename) {
+    const char *ext = strrchr(filename, '.');
+    return (ext != NULL && strcmp(ext, ".bmp") == 0);
 }
  
-void process_file(const char *filename, const char *output_dir, struct dirent *entry) {
+struct bmp_info_header {
+    int width;
+    int height;
+} info_header;
+
+
+char* extract_filename(const char *path)
+{
+    char *filename = strdup(path);
+    char *basename_result = basename(filename);
+    char *result = strdup(basename_result);
+    free(filename);
+    return result;
+}
+ 
+void get_bmp_info(const char *filename) {
+    // Deschidem fisierul BMP pentru citire
+    int read_fd = open(filename, O_RDONLY);
+    if (read_fd == -1) {
+        perror("Eroare la deschiderea fisierului bmp pentru citire");
+        return;
+    }
+
+    // Citim header-ul BMP
+    char header[54];
+    if (read(read_fd, header, sizeof(header)) != sizeof(header)) {
+        perror("Eroare la citirea header-ului BMP");
+        close(read_fd);
+        return;
+    }
+    
+     // Setăm poziția curentă la începutul header-ului BMP
+    if (lseek(read_fd, 18, SEEK_SET) == -1) {
+        perror("Eroare la setarea poziției curente pentru citire");
+        close(read_fd);
+        return;
+    }
+
+    // Citim inalțimea și lățimea imaginii BMP
+    if (read(read_fd, &info_header, sizeof(struct bmp_info_header)) != sizeof(struct bmp_info_header)) {
+        perror("Eroare la citirea inaltimei si latimii BMP");
+        close(read_fd);
+        return;
+    }
+
+    // Deschidem fisierul BMP pentru scriere
+    int write_fd = open("output.bmp", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (write_fd == -1) {
+        perror("Eroare la deschiderea fisierului bmp pentru scriere");
+        close(read_fd);
+        return;
+    }
+
+    // Scriem header-ul BMP in fisierul de iesire
+    if (write(write_fd, header, sizeof(header)) != sizeof(header)) {
+        perror("Eroare la scrierea header-ului BMP");
+        close(read_fd);
+        close(write_fd);
+        return;
+    }
+
+    // Setăm poziția curentă la începutul datelor imaginii BMP
+    if (lseek(read_fd, *(int*)&header[10], SEEK_SET) == -1) {
+        perror("Eroare la setarea poziției curente pentru citire");
+        close(read_fd);
+        close(write_fd);
+        return;
+    }
+
+    int width = info_header.width;
+    int height = info_header.height;
+    
+    int pixel_data_size = width * height;
+    
+
+    unsigned char pixel[3];
+    // Citim, procesam pixelii si scriem in fisierul de iesire
+    for (int i = 0; i < pixel_data_size; i++) {
+        if (read(read_fd, pixel, sizeof(pixel)) != sizeof(pixel)) {
+            perror("Eroare la citirea pixelilor BMP\n");
+            close(read_fd);
+            close(write_fd);
+            return;
+        }
+
+        // Calculam intensitatea tonurilor de gri
+        unsigned char P_gri = (pixel[2] + pixel[1] + pixel[0]) / 3;
+
+        // Setam cele 3 valori cu valoarea P_gri
+        pixel[0] = P_gri;
+        pixel[1] = P_gri;
+        pixel[2] = P_gri;
+
+        // Scriem noile valori in fisierul de iesire
+        if (write(write_fd, pixel, sizeof(pixel)) == -1) {
+            perror("Eroare la scrierea pixelilor BMP\n");
+            close(read_fd);
+            close(write_fd);
+            return;
+        }
+    }
+
+    // Închidem ambele fisiere
+    close(read_fd);
+    close(write_fd);
+}
+
+
+ 
+void process_file(const char *filename, const char *output_dir)
+{
+    DIR *dir;
+    if((dir = opendir(output_dir)) == NULL)
+    {
+        perror("Eroare deschidere director scriere");
+        exit(1);
+    }
+    pid_t pid = fork();
+    int status;
+    int nr_linii = 0;
+    // Obținem dimensiunea fișierului folosind funcția stat
     struct stat file_stat;
     if (lstat(filename, &file_stat) == -1) {
-        perror("Eroare obtinere informatii fisier");
+        perror("Eroare la obtinerea informatiilor despre fisier");
         return;
     }
  
-    char *username = getlogin();
-    if (username == NULL) {
-        perror("Eroare obtinere nume utilizator");
+    // Obținem identificatorul utilizatorului și timpul ultimei modificări
+    char time_string[20];
+    if(localtime(&file_stat.st_mtime) == NULL)
+    {
+        perror("Eroare obtinre timp modificare");
         return;
     }
- 
-    char modification_time_str[20];
-    struct tm *tm_info = localtime(&file_stat.st_mtime);
-    if (tm_info == NULL) {
-        perror("Eroare obtinere timp modificare");
-        return;
-    }
- 
-    strftime(modification_time_str, sizeof(modification_time_str), "%d.%m.%Y", tm_info);
+    strftime(time_string, sizeof(time_string), "%d.%m.%Y", localtime(&file_stat.st_mtime));
  
     char permissions_user[4];
     char permissions_group[4];
@@ -62,148 +173,143 @@ void process_file(const char *filename, const char *output_dir, struct dirent *e
             (file_stat.st_mode & S_IWOTH) ? 'W' : '-',
             (file_stat.st_mode & S_IXOTH) ? 'X' : '-');
  
-    char stats[1024];
-    if (S_ISLNK(file_stat.st_mode)) {
-        char target[1024];
-        ssize_t len = readlink(filename, target, sizeof(target) - 1);
-        if (len != -1) {
-            target[len] = '\0';
-            sprintf(stats, "nume legatura: %s\ndimensiune legatura: %ld\ndimensiune fisier target: %ld\ndrepturi de acces user legatura: %s\ndrepturi de acces grup legatura: %s\ndrepturi de acces altii legatura: %s\n", filename, file_stat.st_size, file_stat.st_blocks, permissions_user, permissions_group, permissions_other);
-        }
-    } else if (S_ISREG(file_stat.st_mode)) {
-        if (endsWithBmp(filename)) {
-            pid_t pid = fork();
- 
-            if (pid == -1) {
-                perror("Eroare la crearea procesului pentru imaginea BMP");
-            } else if (pid == 0) { // Proces fiu pentru imaginea BMP
-                //Deschiderea fișierului BMP în mod de citire binară
-	      int bmp_file = open(filename, O_RDONLY);
-	      if (bmp_file == -1) {
-		perror("Eroare deschidere fisier");
-	      }	
-	      // Setăm poziția curentă la începutul header-ului BMP
-	      if (lseek(bmp_file, 14, SEEK_SET) == -1) {
-		perror("Eroare la setarea poziției curente");
-		close(bmp_file);
-	      }
- 
-                // Citim înălțimea și lățimea imaginii BMP
-		struct bmp_info_header info_header;
-                if (read(bmp_file, &info_header, sizeof(struct bmp_info_header)) != sizeof(struct bmp_info_header)) {
-                perror("Eroare la citirea înălțimii și lățimii BMP");
-                close(bmp_file);
+    
+    char *base = extract_filename(filename);
+    char output_filename[1024];
+    sprintf(output_filename, "%s/statistica_%s.txt", output_dir, base);
+    if(pid < 0)
+    {
+        perror("Eroare fork\n");
+        exit(-1);
+    }else if(pid == 0)
+    {
+        if (S_ISLNK(file_stat.st_mode)) {
+            // Deschidem fisierul statistica_link.txt pentru scriere
+            int output_link = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+            if (output_link == -1) {
+                perror("Eroare la crearea fisierului statistica.txt");
                 return;
-		}
- 
-		 sprintf(stats, "nume fisier: %s\ndimensiune: %u\ninaltime: %u\nlungime: %u\nidentificatorul utilizatorului: %s\ntimpul ultimei modificari: %s\ncontorul de legaturi: %ld\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, info_header.size, info_header.height, info_header.width, username, modification_time_str, file_stat.st_nlink, permissions_user, permissions_group, permissions_other);
-		 
-                // Calculăm numărul total de pixeli
-                int num_pixels = info_header.width * info_header.height;
- 
- 
-                // Citim și procesăm pixelii imaginii BMP
-                for (int i = 0; i < num_pixels; i++) {
-                    unsigned char pixel[3];
-                    if (read(bmp_file, pixel, sizeof(pixel)) != sizeof(pixel)) {
-                        perror("Eroare la citirea pixelilor BMP");
-                        close(bmp_file);
-                        exit(EXIT_FAILURE);
-                    }
- 
-                    // Calculăm intensitatea tonului de gri
-                    unsigned char P_gri = 0.299 * pixel[2] + 0.587 * pixel[1] + 0.114 * pixel[0];
- 
-                    // Suprascriem cele 3 valori cu valoarea P_gri
-                    memset(pixel, P_gri, sizeof(pixel));
- 
-                    // Revenim la poziția curentă a pixelului în fișier
-                    if (lseek(bmp_file, -sizeof(pixel), SEEK_CUR) == -1) {
-                        perror("Eroare la revenirea la poziția curentă");
-                        close(bmp_file);
-                        exit(EXIT_FAILURE);
-                    }
- 
-                    // Scriem noile valori în fișier
-                    if (write(bmp_file, pixel, sizeof(pixel)) != sizeof(pixel)) {
-                        perror("Eroare la scrierea pixelilor BMP");
-                        close(bmp_file);
-                        exit(EXIT_FAILURE);
-                    }
-                }
- 
- 
-              
-            } else { 
-               int status;
-                waitpid(pid, &status, 0);
-                printf("S-a încheiat procesul pentru imaginea BMP cu pid-ul %d și codul %d\n", pid, WEXITSTATUS(status));
             }
+            char target[1024];
+            struct stat leg_stat;
+            if (stat(filename, &leg_stat) == -1) {
+                perror("Eroare la obtinerea informatiilor despre fisier");
+                return;
+            }
+ 
+            ssize_t len = readlink(filename, target, sizeof(target) - 1);
+            if (len != -1) {
+                target[len] = '\0';
+                sprintf(stats, "nume legatura: %s\ndimensiune legatura: %ld\ndimensiune fisier target: %ld\ndrepturi de acces user legatura: %s\ndrepturi de acces grup legatura: %s\ndrepturi de acces altii legatura: %s\n", filename, file_stat.st_size, leg_stat.st_size, permissions_user, permissions_group, permissions_other);
+            }
+            nr_linii = write(output_link, stats, strlen(stats));
+            if (nr_linii == -1) {
+                perror("Eroare scriere in fisier de statistici");
+            }
+            close(output_link);
+        }else if (S_ISREG(file_stat.st_mode))
+        {
+            // Verificăm dacă fișierul are extensia ".bmp"
+            if (is_bmp_file(filename)) {
+                pid_t pid_bmp = fork();
+                if(pid_bmp == -1)
+                {
+                    perror("Eroare la crearea procesului pt imaginea BMP\n");
+                    exit(-1);
+                }else if (pid_bmp == 0){//proces fiu
+                    get_bmp_info(filename);
+                }
+                else {
+                    int status;
+                    waitpid(pid_bmp, &status, 0);
+                    printf("S-a incheiat procesul pentru imaginea BMP cu pid-ul %d si codul %d\n", pid_bmp, WEXITSTATUS(status));
+                }
+                // Deschidem fisierul statistica_bmp.txt pentru scriere
+                int output_bmp = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                if (output_bmp == -1) {
+                    perror("Eroare la crearea fisierului statistica.txt");
+                    return;
+                }
+                sprintf(stats, "nume fisier: %s\ndimensiune: %ld\nidentificatorul utilizatorului: %d\ntimpul ultimei modificari: %s\ncontorul de legaturi: %ld\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename,  (long)file_stat.st_size, file_stat.st_uid, time_string, file_stat.st_nlink, permissions_user, permissions_group, permissions_other);
+                nr_linii = write(output_bmp, stats, strlen(stats));
+                if ( nr_linii == -1) {
+                    perror("Eroare scriere in fisier de statistici");
+                }
+                close(output_bmp);
+            }
+            else {
+                // Deschidem fisierul statistica_fisier.txt pentru scriere
+                int output_fisier = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                if (output_fisier == -1) {
+                    perror("Eroare la crearea fisierului statistica.txt");
+                    return;
+                }
+                sprintf(stats, "nume fisier: %s\ndimensiune: %ld\nidentificatorul utilizatorului: %d\ntimpul ultimei modificari: %s\ncontorul de legaturi: %ld\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, file_stat.st_size, file_stat.st_uid, time_string, file_stat.st_nlink, permissions_user, permissions_group, permissions_other);
+                nr_linii = write(output_fisier, stats, strlen(stats));
+                if (nr_linii == -1) {
+                    perror("Eroare scriere in fisier de statistici");
+                }
+                close(output_fisier);
+            }
+        }else if (S_ISDIR(file_stat.st_mode))
+        {
+            // Deschidem fisierul statistica_folder.txt pentru scriere
+            int output_folder = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+            if (output_folder == -1) {
+                perror("Eroare la crearea fisierului statistica.txt");
+                return;
+            }
+            sprintf(stats, "nume director: %s\nidentificatorul utilizatorului: %d\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, file_stat.st_uid, permissions_user, permissions_group, permissions_other);
+            nr_linii = write(output_folder, stats, strlen(stats));
+            if (nr_linii == -1) {
+                perror("Eroare scriere in fisier de statistici");
+            }
+            close(output_folder);
         }else{
-	  // Restul fișierelor
-	  sprintf(stats, "nume fisier: %s\ndimensiune: %ld\nidentificatorul utilizatorului: %s\ntimpul ultimei modificari: %s\ncontorul de legaturi: %ld\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, file_stat.st_size, username, modification_time_str, file_stat.st_nlink, permissions_user, permissions_group, permissions_other);
-	}
- 
-    } else if (S_ISDIR(file_stat.st_mode)) {
-        sprintf(stats, "nume director: %s\nidentificatorul utilizatorului: %s\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, username, permissions_user, permissions_group, permissions_other);
-    } else {
-        // Alte tipuri de fișiere
-        sprintf(stats, "nume necunoscut: %s\ndimensiune: %ld\ndrepturi de acces user: %s\ndrepturi de acces grup: %s\ndrepturi de acces altii: %s\n", filename, file_stat.st_size, permissions_user, permissions_group, permissions_other);
+            //Nu se scrie nimic 
+        }
+        exit(nr_linii);
+    }else {
+        //daca e parinte
+        pid = wait(&status);
+        if(WIFEXITED(status))
+        {
+            printf("Child with id = %d exited with status code %d\n", pid, WEXITSTATUS(status));
+        }
     }
+    free(base);            
+    closedir(dir);
  
-    // Scriem în fișierul de statistici corespunzător
-    char output_file[1024];
-    sprintf(output_file, "%s/%s_statistica.txt", output_dir, entry->d_name);
-    int stat_file = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (stat_file == -1) {
-        perror("Eroare deschidere fisier de statistici");
-        return;
-    }
- 
-    if (write(stat_file, stats, strlen(stats)) == -1) {
-        perror("Eroare scriere in fisier de statistici");
-    }
- 
-    close(stat_file);
 }
  
-void process_directory(const char *dirname, const char *output_dir) {
-    DIR *dir = opendir(dirname);
-    if (dir == NULL) {
+void citire_director(const char *director, const char *output_dir)
+{
+ 
+    DIR *dir;
+    if((dir = opendir(director)) == NULL)
+    {
         perror("Eroare deschidere director");
-        return;
+        exit(1);
     }
- 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-            char path[1024];
-            sprintf(path, "%s/%s", dirname, entry->d_name);
-            process_file(path, output_dir, entry);
-        }
-    }
  
-    closedir(dir);
+    char str[1024];
+    while((entry=readdir(dir))!=NULL)
+    {
+        if(strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0){
+	        sprintf(str, "%s/%s", director, entry->d_name);
+            process_file(str, output_dir);
+        }
+    } 
 }
  
 int main(int argc, char *argv[]) {
-    // Verificare dacă programul a primit două argumente
+ 
     if (argc != 3) {
-        printf("Usage: %s <director_intrare> <director_iesire>\n", argv[0]);
+        printf("Usage: %s <fisier_intrare>\n", argv[0]);
         return 1;
     }
  
-    // Crearea directorului de ieșire
-    if (mkdir(argv[2], 0777) == -1) {
-        perror("Eroare creare director de iesire");
-        return 1;
-    }
- 
-    // Procesarea directorului
-    process_directory(argv[1], argv[2]);
- 
+    citire_director(argv[1], argv[2]);
     return 0;
-}
- 
-
- 
+}  
