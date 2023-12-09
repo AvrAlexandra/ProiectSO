@@ -24,6 +24,7 @@ struct bmp_info_header {
     int height;
 } info_header;
 
+// Extrage numele de fișier dintr-o cale de fișier
 char *extract_filename(const char *path) {
     char *filename = strdup(path);
     char *basename_result = basename(filename);
@@ -152,7 +153,6 @@ int count_correct_sentences(const char *filename, char character) {
         // Executăm script-ul Bash pentru numărarea propozițiilor corecte
         execlp("./script.sh", "./script.sh", filename, &character, (char *)NULL);
 
-        // Dacă execuția ajunge aici, a apărut o eroare
         perror("Eroare la execuția script-ului");
         exit(EXIT_FAILURE);
     } else { // Proces părinte
@@ -221,7 +221,24 @@ void process_file(const char *filename, const char *output_dir, char character) 
         exit(-1);
     } else if (pid == 0) {
         if (S_ISLNK(file_stat.st_mode)) {
-            // ... (codul existent pentru link-uri simbolice)
+        
+            // Deschidem fisierul statistica_link.txt pentru scriere
+            int output_link = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+            if (output_link == -1) {
+                perror("Eroare la crearea fisierului statistica.txt");
+                return;
+            }
+            char target[1024];
+            struct stat leg_stat;
+            if (stat(filename, &leg_stat) == -1) {
+                perror("Eroare la obtinerea informatiilor despre fisier");
+                return;
+            }
+ 
+            ssize_t len = readlink(filename, target, sizeof(target) - 1);
+            if (len != -1) {
+                target[len] = '\0';
+                sprintf(stats, "nume legatura: %s\ndimensiune legatura: %ld\ndimensiune fisier target: %ld\ndrepturi de acces user legatura: %s\ndrepturi de acces grup legatura: %s\ndrepturi de acces altii legatura: %s\n", filename, file_stat.st_size, leg_stat.st_size, permissions_user, permissions_group, permissions_other);}
         } else if (S_ISREG(file_stat.st_mode)) {
             // Verificăm dacă fișierul are extensia ".bmp"
             if (is_bmp_file(filename)) {
